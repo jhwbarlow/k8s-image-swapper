@@ -1,0 +1,9 @@
+FROM golang:1.18 AS build
+WORKDIR /tmp/src
+COPY . ./
+RUN ls -l cmd && ls -l pkg && ls -l vendor && ls -l *.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -v -o /tmp/build/k8s-image-swapper
+
+FROM gcr.io/distroless/static-debian11 AS release
+COPY --from=build /tmp/build/k8s-image-swapper /usr/bin/k8s-image-swapper
+ENTRYPOINT ["/usr/bin/k8s-image-swapper"]

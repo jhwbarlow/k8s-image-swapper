@@ -41,8 +41,10 @@ type Config struct {
 	ImageCopyPolicy   string        `yaml:"imageCopyPolicy" validate:"oneof=delayed immediate force none"`
 	ImageCopyDeadline time.Duration `yaml:"imageCopyDeadline"`
 
-	Source Source   `yaml:"source"`
-	Target Registry `yaml:"target"`
+	Source      Source           `yaml:"source"`
+	Target      Target           `yaml:"target"`
+	SwapFilters []JMESPathFilter `yaml:"swapFilters"`
+	CopyFilters []JMESPathFilter `yaml:"copyFilters"`
 
 	TLSCertFile string
 	TLSKeyFile  string
@@ -52,8 +54,12 @@ type JMESPathFilter struct {
 	JMESPath string `yaml:"jmespath"`
 }
 type Source struct {
-	Registries []Registry       `yaml:"registries"`
-	Filters    []JMESPathFilter `yaml:"filters"`
+	Registries []Registry `yaml:"registries"`
+}
+
+type Target struct {
+	Registry         `yaml:",inline" mapstructure:",squash"` // https://pkg.go.dev/github.com/mitchellh/mapstructure#hdr-Embedded_Structs_and_Squashing
+	RepositoryPrefix string `yaml:"repositoryPrefix"`
 }
 
 type Registry struct {

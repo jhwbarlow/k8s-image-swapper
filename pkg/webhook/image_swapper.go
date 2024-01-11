@@ -33,10 +33,24 @@ func ImagePullSecretsProvider(provider secrets.ImagePullSecretsProvider) Option 
 	}
 }
 
-// Filters allows to pass JMESPathFilter to select the images to be swapped
-func Filters(filters []config.JMESPathFilter) Option {
+// SwapFilters allows to pass JMESPathFilter to filter out images to not be swapped/mutated
+func SwapFilters(filters []config.JMESPathFilter) Option {
 	return func(swapper *ImageSwapper) {
-		swapper.filters = filters
+		swapper.swapFilters = filters
+	}
+}
+
+// CopyFilters allows to pass JMESPathFilter to filter out images to not be copied/vendored
+func CopyFilters(filters []config.JMESPathFilter) Option {
+	return func(swapper *ImageSwapper) {
+		swapper.copyFilters = filters
+	}
+}
+
+// TargetPrefix allows to pass a prefix for image names
+func TargetPrefix(prefix string) Option {
+	return func(swapper *ImageSwapper) {
+		swapper.targetPrefix = prefix
 	}
 }
 
@@ -73,9 +87,13 @@ type ImageSwapper struct {
 	registryClient          registry.Client
 	imagePullSecretProvider secrets.ImagePullSecretsProvider
 
-	// filters defines a list of expressions to remove objects that should not be processed,
+	// swapFilters defines a list of expressions to remove objects that should not be mutated,
 	// by default all objects will be processed
-	filters []config.JMESPathFilter
+	swapFilters []config.JMESPathFilter
+
+	// copyFilters defines a list of expressions to remove objects that should not be copied,
+	// by default all objects will be processed
+	copyFilters []config.JMESPathFilter
 
 	// copier manages the jobs copying the images to the target registry
 	copier            *pond.WorkerPool
@@ -83,15 +101,25 @@ type ImageSwapper struct {
 
 	imageSwapPolicy types.ImageSwapPolicy
 	imageCopyPolicy types.ImageCopyPolicy
+	targetPrefix    string
 }
 
 // NewImageSwapper returns a new ImageSwapper initialized.
-func NewImageSwapper(registryClient registry.Client, imagePullSecretProvider secrets.ImagePullSecretsProvider, filters []config.JMESPathFilter, imageSwapPolicy types.ImageSwapPolicy, imageCopyPolicy types.ImageCopyPolicy, imageCopyDeadline time.Duration) kwhmutating.Mutator {
+func NewImageSwapper(registryClient registry.Client,
+	imagePullSecretProvider secrets.ImagePullSecretsProvider,
+	swapFilters []config.JMESPathFilter,
+	copyFilters []config.JMESPathFilter,
+	targetPrefix string,
+	imageSwapPolicy types.ImageSwapPolicy,
+	imageCopyPolicy types.ImageCopyPolicy,
+	imageCopyDeadline time.Duration) kwhmutating.Mutator {
 	return &ImageSwapper{
 		registryClient:          registryClient,
 		imagePullSecretProvider: imagePullSecretProvider,
-		filters:                 filters,
+		swapFilters:             swapFilters,
+		copyFilters:             copyFilters,
 		copier:                  pond.New(100, 1000),
+		targetPrefix:            targetPrefix,
 		imageSwapPolicy:         imageSwapPolicy,
 		imageCopyPolicy:         imageCopyPolicy,
 		imageCopyDeadline:       imageCopyDeadline,
@@ -103,9 +131,11 @@ func NewImageSwapperWithOpts(registryClient registry.Client, opts ...Option) kwh
 	swapper := &ImageSwapper{
 		registryClient:          registryClient,
 		imagePullSecretProvider: secrets.NewDummyImagePullSecretsProvider(),
-		filters:                 []config.JMESPathFilter{},
+		swapFilters:             []config.JMESPathFilter{},
+		copyFilters:             []config.JMESPathFilter{},
 		imageSwapPolicy:         types.ImageSwapPolicyExists,
 		imageCopyPolicy:         types.ImageCopyPolicyDelayed,
+		targetPrefix:            "",
 	}
 
 	for _, opt := range opts {
@@ -132,8 +162,22 @@ func NewImageSwapperWebhookWithOpts(registryClient registry.Client, opts ...Opti
 	return kwhmutating.NewWebhook(mcfg)
 }
 
-func NewImageSwapperWebhook(registryClient registry.Client, imagePullSecretProvider secrets.ImagePullSecretsProvider, filters []config.JMESPathFilter, imageSwapPolicy types.ImageSwapPolicy, imageCopyPolicy types.ImageCopyPolicy, imageCopyDeadline time.Duration) (webhook.Webhook, error) {
-	imageSwapper := NewImageSwapper(registryClient, imagePullSecretProvider, filters, imageSwapPolicy, imageCopyPolicy, imageCopyDeadline)
+func NewImageSwapperWebhook(registryClient registry.Client,
+	imagePullSecretProvider secrets.ImagePullSecretsProvider,
+	swapFilters []config.JMESPathFilter,
+	copyFilters []config.JMESPathFilter,
+	targetPrefix string,
+	imageSwapPolicy types.ImageSwapPolicy,
+	imageCopyPolicy types.ImageCopyPolicy,
+	imageCopyDeadline time.Duration) (webhook.Webhook, error) {
+	imageSwapper := NewImageSwapper(registryClient,
+		imagePullSecretProvider,
+		swapFilters,
+		copyFilters,
+		targetPrefix,
+		imageSwapPolicy,
+		imageCopyPolicy,
+		imageCopyDeadline)
 	mt := kwhmutating.MutatorFunc(imageSwapper.Mutate)
 	mcfg := kwhmutating.WebhookConfig{
 		ID:      "k8s-image-swapper",
@@ -183,7 +227,11 @@ func (p *ImageSwapper) Mutate(ctx context.Context, ar *kwhmodel.AdmissionReview,
 	containerSets := []*[]corev1.Container{&pod.Spec.Containers, &pod.Spec.InitContainers}
 	for _, containerSet := range containerSets {
 		containers := *containerSet
+		// XXX: Because containers is a slice of structs, not pointers,
+		// to mutate the container we must use the slice index and not the
+		// local copy of `container` in the loop.
 		for i, container := range containers {
+
 			normalizedName, err := imageNamesWithDigestOrTag(container.Image)
 			if err != nil {
 				log.Ctx(lctx).Warn().Msgf("unable to normalize source name %s: %v", container.Image, err)
@@ -202,59 +250,68 @@ func (p *ImageSwapper) Mutate(ctx context.Context, ar *kwhmodel.AdmissionReview,
 				continue
 			}
 
+			// Set the container image to the fully-qualified name so that we can use filters on `docker.io` to match
+			// images with an implicit docker.io registry: e.g. `debian` or `curlimages/curl`.
+			// These would be full-qualified to `docker.io/library/debian` and `docker.io/curlimages/curl` respectively.
+			ambiguousName := container.Image
+			container.Image = srcRef.DockerReference().String()
+			log.Ctx(lctx).Debug().Str("ambiguousName", ambiguousName).Str("fullyQualifiedName", container.Image).Msg("fully-qualified container image reference")
 			filterCtx := NewFilterContext(*ar, pod, container)
-			if filterMatch(filterCtx, p.filters) {
-				log.Ctx(lctx).Debug().Msg("skip due to filter condition")
-				continue
-			}
 
 			targetRef := p.targetRef(srcRef)
 			targetImage := targetRef.DockerReference().String()
 
-			imageCopierLogger := logger.With().
-				Str("source-image", srcRef.DockerReference().String()).
-				Str("target-image", targetImage).
-				Logger()
+			if p.imageCopyPolicy != types.ImageCopyPolicyNone {
+				imageCopierLogger := logger.With().
+					Str("source-image", srcRef.DockerReference().String()).
+					Str("target-image", targetImage).
+					Logger()
 
-			imageCopierContext := imageCopierLogger.WithContext(lctx)
-			// create an object responsible for the image copy
-			imageCopier := ImageCopier{
-				sourcePod:       pod,
-				sourceImageRef:  srcRef,
-				targetImageRef:  targetRef,
-				imagePullPolicy: container.ImagePullPolicy,
-				imageSwapper:    p,
-				context:         imageCopierContext,
+				imageCopierContext := imageCopierLogger.WithContext(lctx)
+				// create an object responsible for the image copy
+				imageCopier := ImageCopier{
+					sourcePod:        pod,
+					sourceImageRef:   srcRef,
+					targetImageRef:   targetRef,
+					repositoryPrefix: p.targetPrefix,
+					imagePullPolicy:  container.ImagePullPolicy,
+					imageSwapper:     p,
+					context:          imageCopierContext,
+				}
+
+				if filterMatch(filterCtx, p.copyFilters) {
+					log.Ctx(imageCopierContext).Debug().Msg("skip copy due to filter condition")
+				} else {
+					switch p.imageCopyPolicy {
+					case types.ImageCopyPolicyDelayed:
+						p.copier.Submit(imageCopier.start)
+					case types.ImageCopyPolicyImmediate:
+						p.copier.SubmitAndWait(imageCopier.withDeadline().start)
+					case types.ImageCopyPolicyForce:
+						imageCopier.withDeadline().start()
+					default:
+						panic("unknown imageCopyPolicy")
+					}
+				}
 			}
 
-			// imageCopyPolicy
-			switch p.imageCopyPolicy {
-			case types.ImageCopyPolicyDelayed:
-				p.copier.Submit(imageCopier.start)
-			case types.ImageCopyPolicyImmediate:
-				p.copier.SubmitAndWait(imageCopier.withDeadline().start)
-			case types.ImageCopyPolicyForce:
-				imageCopier.withDeadline().start()
-			case types.ImageCopyPolicyNone:
-				// do not copy image
-			default:
-				panic("unknown imageCopyPolicy")
-			}
-
-			// imageSwapPolicy
-			switch p.imageSwapPolicy {
-			case types.ImageSwapPolicyAlways:
-				log.Ctx(lctx).Debug().Str("image", targetImage).Msg("set new container image")
-				containers[i].Image = targetImage
-			case types.ImageSwapPolicyExists:
-				if p.registryClient.ImageExists(lctx, targetRef) {
+			if filterMatch(filterCtx, p.swapFilters) {
+				log.Ctx(lctx).Debug().Msg("skip swap due to filter condition")
+			} else {
+				switch p.imageSwapPolicy {
+				case types.ImageSwapPolicyAlways:
 					log.Ctx(lctx).Debug().Str("image", targetImage).Msg("set new container image")
 					containers[i].Image = targetImage
-				} else {
-					log.Ctx(lctx).Debug().Str("image", targetImage).Msg("container image not found in target registry, not swapping")
+				case types.ImageSwapPolicyExists:
+					if p.registryClient.ImageExists(lctx, targetRef) {
+						log.Ctx(lctx).Debug().Str("image", targetImage).Msg("set new container image")
+						containers[i].Image = targetImage
+					} else {
+						log.Ctx(lctx).Debug().Str("image", targetImage).Msg("container image not found in target registry, not swapping")
+					}
+				default:
+					panic("unknown imageSwapPolicy")
 				}
-			default:
-				panic("unknown imageSwapPolicy")
 			}
 		}
 	}
@@ -279,19 +336,22 @@ func filterMatch(ctx FilterContext, filters []config.JMESPathFilter) bool {
 	}
 
 	log.Debug().Interface("object", filterContext).Msg("generated filter context")
+	log.Debug().Msgf("applying %d filters", len(filters))
 
-	for idx, filter := range filters {
-		results, err := jmespath.Search(filter.JMESPath, filterContext)
-		log.Debug().Str("filter", filter.JMESPath).Interface("results", results).Msg("jmespath search results")
+	for i, filter := range filters {
+		log.Debug().Str("filter", filter.JMESPath).Msgf("applying filter %d", i)
+		result, err := jmespath.Search(filter.JMESPath, filterContext)
+		log.Debug().Str("filter", filter.JMESPath).Interface("results", result).Msg("jmespath search results")
 
 		if err != nil {
-			log.Err(err).Str("filter", filter.JMESPath).Msgf("Filter (idx %v) could not be evaluated.", idx)
+			log.Err(err).Str("filter", filter.JMESPath).Msgf("Filter (idx %v) could not be evaluated.", i)
 			return false
 		}
 
-		switch results.(type) {
+		switch result.(type) {
 		case bool:
-			if results == true {
+			if result == true {
+				log.Debug().Str("filter", filter.JMESPath).Msg("Filter matched")
 				return true
 			}
 		default:
@@ -304,7 +364,7 @@ func filterMatch(ctx FilterContext, filters []config.JMESPathFilter) bool {
 
 // targetName returns the reference in the target repository
 func (p *ImageSwapper) targetRef(srcRef ctypes.ImageReference) ctypes.ImageReference {
-	targetImage := fmt.Sprintf("%s/%s", p.registryClient.Endpoint(), srcRef.DockerReference().String())
+	targetImage := fmt.Sprintf("%s/%s%s", p.registryClient.Endpoint(), p.targetPrefix, srcRef.DockerReference().String())
 
 	ref, err := alltransports.ParseImageName("docker://" + targetImage)
 	if err != nil {

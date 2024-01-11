@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/containers/image/v5/docker/reference"
@@ -13,9 +14,10 @@ import (
 
 // struct representing a job of copying an image with its subcontext
 type ImageCopier struct {
-	sourcePod      *corev1.Pod
-	sourceImageRef ctypes.ImageReference
-	targetImageRef ctypes.ImageReference
+	sourcePod        *corev1.Pod
+	sourceImageRef   ctypes.ImageReference
+	targetImageRef   ctypes.ImageReference
+	repositoryPrefix string
 
 	imagePullPolicy corev1.PullPolicy
 	imageSwapper    *ImageSwapper
@@ -101,7 +103,7 @@ func (ic *ImageCopier) taskCheckImage() error {
 }
 
 func (ic *ImageCopier) taskCreateRepository() error {
-	createRepoName := reference.TrimNamed(ic.sourceImageRef.DockerReference()).String()
+	createRepoName := fmt.Sprintf("%s%s", ic.repositoryPrefix, reference.TrimNamed(ic.sourceImageRef.DockerReference()).String())
 
 	return ic.imageSwapper.registryClient.CreateRepository(ic.context, createRepoName)
 }

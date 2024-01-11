@@ -1,33 +1,17 @@
-#FROM quay.io/skopeo/stable:v1.2.0 AS skopeo
-#FROM gcr.io/distroless/base-debian10
-#FROM debian:10
-#COPY --from=skopeo /usr/bin/skopeo /skopeo
+FROM golang:1.18 AS build
+WORKDIR /tmp/src
+COPY . ./
+RUN ls -l cmd && ls -l pkg && ls -l vendor && ls -l *.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -v -o /tmp/build/k8s-image-swapper
 
-# TODO: Using alpine for now due to easier installation of skopeo
-#       Will use distroless after incorporating skopeo into the webhook directly
-FROM alpine:3.19.0
-RUN ["apk", "add", "--no-cache", "--repository=http://dl-cdn.alpinelinux.org/alpine/edge/community", "skopeo>=1.2.0"]
-
-COPY k8s-image-swapper /
-
-ENTRYPOINT ["/k8s-image-swapper"]
-
-ARG BUILD_DATE
-ARG VCS_REF
-
-LABEL maintainer="k8s-image-swapper <https://github.com/estahn/k8s-image-swapper/issues>" \
-      org.opencontainers.image.title="k8s-image-swapper" \
-      org.opencontainers.image.description="Mirror images into your own registry and swap image references automatically." \
-      org.opencontainers.image.url="https://github.com/estahn/k8s-image-swapper" \
-      org.opencontainers.image.source="https://github.com/estahn/k8s-image-swapper" \
-      org.opencontainers.image.vendor="estahn" \
-      org.label-schema.schema-version="1.0" \
-      org.label-schema.name="k8s-image-swapper" \
-      org.label-schema.description="Mirror images into your own registry and swap image references automatically." \
-      org.label-schema.url="https://github.com/estahn/k8s-image-swapper" \
-      org.label-schema.vcs-url="git@github.com:estahn/k8s-image-swapper.git" \
-      org.label-schema.vendor="estahn" \
-      org.opencontainers.image.revision="$VCS_REF" \
-      org.opencontainers.image.created="$BUILD_DATE" \
-      org.label-schema.vcs-ref="$VCS_REF" \
-      org.label-schema.build-date="$BUILD_DATE"
+FROM debian:trixie-slim AS release
+COPY --from=build /tmp/build/k8s-image-swapper /usr/bin/k8s-image-swapper
+# Ignore warning about not specifying exact version.
+# ca-certificates package is just a collection of certs, we always want the latest.
+# hadolint ignore=DL3008
+RUN apt-get update \
+      && apt-get install -y ca-certificates --no-install-recommends \
+      && apt-get install -y skopeo=1.13.3+ds1-2 \
+      && rm -rf /var/lib/apt/lists/*
+USER nobody:nogroup
+ENTRYPOINT ["/usr/bin/k8s-image-swapper"]

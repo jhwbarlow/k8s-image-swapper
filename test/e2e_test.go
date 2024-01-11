@@ -156,17 +156,17 @@ func TestHelmDeployment(t *testing.T) {
 		options := &helm.Options{
 			KubectlOptions: kubectlOptions,
 			SetValues: map[string]string{
-				"config.logFormat":                  "console",
-				"config.logLevel":                   "debug",
-				"config.dryRun":                     "false",
-				"config.target.aws.accountId":       awsAccountID,
-				"config.target.aws.region":          awsRegion,
-				"config.imageSwapPolicy":            "always",
-				"config.imageCopyPolicy":            "delayed",
-				"config.source.filters[0].jmespath": "obj.metadata.name != 'nginx'",
-				"awsSecretName":                     "k8s-image-swapper-aws",
-				"image.repository":                  "local/k8s-image-swapper",
-				"image.tag":                         "latest",
+				"config.logFormat":               "console",
+				"config.logLevel":                "debug",
+				"config.dryRun":                  "false",
+				"config.target.aws.accountId":    awsAccountID,
+				"config.target.aws.region":       awsRegion,
+				"config.imageSwapPolicy":         "always",
+				"config.imageCopyPolicy":         "delayed",
+				"config.swapFilters[0].jmespath": "obj.metadata.name != 'nginx'",
+				"awsSecretName":                  "k8s-image-swapper-aws",
+				"image.repository":               "local/k8s-image-swapper",
+				"image.tag":                      "latest",
 			},
 		}
 

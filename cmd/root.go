@@ -75,7 +75,7 @@ A mutating webhook for Kubernetes, pointing the images to a new location.`,
 		}
 
 		// Create a registry client for private target registry
-		targetRegistryClient, err := registry.NewClient(cfg.Target)
+		targetRegistryClient, err := registry.NewClient(cfg.Target.Registry)
 		if err != nil {
 			log.Err(err).Msgf("error connecting to target registry at %s", cfg.Target.Domain())
 			os.Exit(1)
@@ -101,9 +101,22 @@ A mutating webhook for Kubernetes, pointing the images to a new location.`,
 		// Inform secret provider about managed private source registries
 		imagePullSecretProvider.SetAuthenticatedRegistries(sourceRegistryClients)
 
+		// copyFilters is the union of the swapFilters and the explicit copyFilters.
+		// This is because there is no point copying images which can then not be swapped.
+		// XXX: The semantics of the copy() function mean we must set the initial len to the len
+		// of the data to be copied in. These zeroed indices will be overwritten.
+		copyFilters := make([]config.JMESPathFilter, len(cfg.SwapFilters), len(cfg.SwapFilters)+len(cfg.CopyFilters))
+		copy(copyFilters, cfg.SwapFilters)
+		copyFilters = append(copyFilters, cfg.CopyFilters...)
+
+		log.Debug().Msgf("Copy filters: %v", copyFilters)
+		log.Debug().Msgf("Swap filters: %v", cfg.SwapFilters)
+
 		wh, err := webhook.NewImageSwapperWebhookWithOpts(
 			targetRegistryClient,
-			webhook.Filters(cfg.Source.Filters),
+			webhook.SwapFilters(cfg.SwapFilters),
+			webhook.CopyFilters(copyFilters),
+			webhook.TargetPrefix(cfg.Target.RepositoryPrefix),
 			webhook.ImagePullSecretsProvider(imagePullSecretProvider),
 			webhook.ImageSwapPolicy(imageSwapPolicy),
 			webhook.ImageCopyPolicy(imageCopyPolicy),

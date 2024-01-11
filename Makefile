@@ -14,6 +14,7 @@ help: ## List targets & descriptions
 setup: ## Install dependencies
 	go mod download
 	go mod tidy
+	go mod vendor
 
 test: ## Run tests
 	LC_ALL=C go test $(TEST_OPTIONS) -failfast -race -coverpkg=./... -covermode=atomic -coverprofile=coverage.txt $(SOURCE_FILES) -run $(TEST_PATTERN) -timeout=5m

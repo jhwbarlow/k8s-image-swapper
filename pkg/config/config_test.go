@@ -23,17 +23,14 @@ func TestConfigParses(t *testing.T) {
 		{
 			name: "should render multiple filters",
 			cfg: `
-source:
-  filters:
-    - jmespath: "obj.metadata.namespace == 'kube-system'"
-    - jmespath: "obj.metadata.namespace != 'playground'"
+swapFilters:
+  - jmespath: "obj.metadata.namespace == 'kube-system'"
+  - jmespath: "obj.metadata.namespace != 'playground'"
 `,
 			expCfg: Config{
-				Source: Source{
-					Filters: []JMESPathFilter{
-						{JMESPath: "obj.metadata.namespace == 'kube-system'"},
-						{JMESPath: "obj.metadata.namespace != 'playground'"},
-					},
+				SwapFilters: []JMESPathFilter{
+					{JMESPath: "obj.metadata.namespace == 'kube-system'"},
+					{JMESPath: "obj.metadata.namespace != 'playground'"},
 				},
 			},
 		},
@@ -54,21 +51,23 @@ target:
           value: B
 `,
 			expCfg: Config{
-				Target: Registry{
-					Type: "aws",
-					AWS: AWS{
-						AccountID: "123456789",
-						Region:    "ap-southeast-2",
-						Role:      "arn:aws:iam::123456789012:role/roleName",
-						ECROptions: ECROptions{
-							Tags: []Tag{
-								{
-									Key:   "CreatedBy",
-									Value: "k8s-image-swapper",
-								},
-								{
-									Key:   "A",
-									Value: "B",
+				Target: Target{
+					Registry: Registry{
+						Type: "aws",
+						AWS: AWS{
+							AccountID: "123456789",
+							Region:    "ap-southeast-2",
+							Role:      "arn:aws:iam::123456789012:role/roleName",
+							ECROptions: ECROptions{
+								Tags: []Tag{
+									{
+										Key:   "CreatedBy",
+										Value: "k8s-image-swapper",
+									},
+									{
+										Key:   "A",
+										Value: "B",
+									},
 								},
 							},
 						},
